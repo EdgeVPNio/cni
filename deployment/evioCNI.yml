@@ -1,0 +1,170 @@
+---
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: psp.evio.unprivileged
+  annotations:
+    seccomp.security.alpha.kubernetes.io/allowedProfileNames: docker/default
+    seccomp.security.alpha.kubernetes.io/defaultProfileName: docker/default
+    apparmor.security.beta.kubernetes.io/allowedProfileNames: runtime/default
+    apparmor.security.beta.kubernetes.io/defaultProfileName: runtime/default
+spec:
+  privileged: false
+  volumes:
+    - configMap
+    - secret
+    - emptyDir
+    - hostPath
+  allowedHostPaths:
+    - pathPrefix: "/etc/cni/net.d"
+    - pathPrefix: "/etc/kube-evio"
+    - pathPrefix: "/run/evio"
+  readOnlyRootFilesystem: false
+  # Users and groups
+  runAsUser:
+    rule: RunAsAny
+  supplementalGroups:
+    rule: RunAsAny
+  fsGroup:
+    rule: RunAsAny
+  # Privilege Escalation
+  allowPrivilegeEscalation: false
+  defaultAllowPrivilegeEscalation: false
+  # Capabilities
+  allowedCapabilities: ['NET_ADMIN']
+  defaultAddCapabilities: []
+  requiredDropCapabilities: []
+  # Host namespaces
+  hostPID: false
+  hostIPC: false
+  hostNetwork: true
+  hostPorts:
+  - min: 0
+    max: 65535
+  # SELinux
+  seLinux:
+    # SELinux is unused in CaaSP
+    rule: 'RunAsAny'
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: evio
+  namespace: kube-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: store-credentials
+  namespace: kube-system
+data: # base64 encoded
+  username: ZXZwblVzZXI=
+  password: cGFzcw==
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: kube-evio-cfg
+  namespace: kube-system
+  labels:
+    tier: node
+    app: evio
+data:
+  # number of bits for host = nodePrefix - subnet 
+  # in sample config below 26-16 = 8, can have 2^8 hosts 
+  # each with 2^8 pods.
+  net-conf.json: |
+    {
+     "cniVersion": "0.3.1",
+     "name": "k8s-pod-network",
+     "type": "evioPlugin",
+     "bridge": "evioB1B111B",
+     "bridgeType": "OVS",
+     "isGateway": true,
+     "isDefaultGateway": true,
+     "isIPMasq": true,
+     "nodeBits": "8",
+     "podCIDR": "10.244.0.16/16",
+     "dataStore": "0.0.0.0:42000",
+     "auth": false
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-evio-ds-amd64
+  namespace: kube-system
+  labels:
+    tier: node
+    app: evio
+spec:
+  selector:
+    matchLabels:
+      app: evio
+  template:
+    metadata:
+      labels:
+        tier: node
+        app: evio
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/os
+                    operator: In
+                    values:
+                      - linux
+                  - key: kubernetes.io/arch
+                    operator: In
+                    values:
+                      - amd64
+      hostNetwork: true
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
+      serviceAccountName: evio
+      initContainers:
+      - name: install-cni
+        image: evio_plugin:0.0
+        volumeMounts:
+        - name: cni
+          mountPath: /etc/cni/net.d
+        - name: evio-cfg
+          mountPath: /etc/evioCNI/
+        - name: plugin
+          mountPath: /opt/cni/bin/
+        - name: store-credentials
+          mountPath: /etc/credentials/
+      containers:
+      - name: dumdum
+        image: gcr.io/kubernetes-e2e-test-images/dnsutils:1.3
+        command:
+        - sleep
+        args:
+        - "3600"
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "50Mi"
+          limits:
+            cpu: "100m"
+            memory: "50Mi"
+        securityContext:
+          privileged: false
+          capabilities:
+            add: ["NET_ADMIN"]
+      volumes:
+        - name: cni
+          hostPath:
+            path: /etc/cni/net.d
+        - name: plugin
+          hostPath:
+            path: /opt/cni/bin/ 
+        - name: evio-cfg
+          configMap:
+            name: kube-evio-cfg
+        - name: store-credentials
+          secret:
+            secretName: store-credentials
